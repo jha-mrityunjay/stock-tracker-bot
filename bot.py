@@ -11,23 +11,13 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
 # --- Supabase DB Headers ---
-HEADERS = {
+DB_HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type": "application/json",
     "Prefer": "return=representation"
 }
 DB_URL = f"{SUPABASE_URL}/rest/v1/stocks"
-
-# --- NSE Headers (mimics browser to avoid block) ---
-NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.nseindia.com/",
-    "Connection": "keep-alive",
-}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,34 +26,58 @@ def db_select(filters: dict):
     params = {"select": "*"}
     for k, v in filters.items():
         params[k] = f"eq.{v}"
-    r = httpx.get(DB_URL, headers=HEADERS, params=params)
+    r = httpx.get(DB_URL, headers=DB_HEADERS, params=params)
     result = r.json()
     return result if isinstance(result, list) else []
 
 def db_select_all(user_id):
     params = {"select": "*", "user_id": f"eq.{user_id}"}
-    r = httpx.get(DB_URL, headers=HEADERS, params=params)
+    r = httpx.get(DB_URL, headers=DB_HEADERS, params=params)
     result = r.json()
     return result if isinstance(result, list) else []
 
 def db_insert(data: dict):
-    httpx.post(DB_URL, headers=HEADERS, json=data)
+    httpx.post(DB_URL, headers=DB_HEADERS, json=data)
 
 def db_delete(filters: dict):
     params = {}
     for k, v in filters.items():
         params[k] = f"eq.{v}"
-    httpx.delete(DB_URL, headers=HEADERS, params=params)
+    httpx.delete(DB_URL, headers=DB_HEADERS, params=params)
 
 # --- NSE Live Price Fetch ---
 def get_live_price(stock_name: str):
     try:
-        # First hit the NSE homepage to get cookies
-        with httpx.Client(headers=NSE_HEADERS, follow_redirects=True, timeout=10) as client:
-            client.get("https://www.nseindia.com")
-            # Now fetch the actual quote
-            url = f"https://www.nseindia.com/api/quote-equity?symbol={stock_name.upper()}"
-            r = client.get(url)
+        session_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.nseindia.com/get-quotes/equity?symbol=" + stock_name.upper(),
+            "Connection": "keep-alive",
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-dest": "empty",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        with httpx.Client(follow_redirects=True, timeout=15, http2=False) as client:
+            # Step 1: Get cookies by visiting the quote page
+            client.get(
+                f"https://www.nseindia.com/get-quotes/equity?symbol={stock_name.upper()}",
+                headers={
+                    "User-Agent": session_headers["User-Agent"],
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Connection": "keep-alive",
+                }
+            )
+            # Step 2: Fetch the API with JSON headers
+            r = client.get(
+                f"https://www.nseindia.com/api/quote-equity?symbol={stock_name.upper()}",
+                headers=session_headers
+            )
             data = r.json()
             price = data["priceInfo"]["lastPrice"]
             return round(float(price), 2)
