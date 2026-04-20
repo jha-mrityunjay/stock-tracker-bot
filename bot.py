@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import date
 import yfinance as yf
-from supabase import create_client
+from supabase import create_client, Client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
