@@ -1,4 +1,4 @@
 python-telegram-bot==20.7
 yfinance==0.2.36
-supabase==1.2.0
+postgrest-py==0.10.8
 httpx==0.25.2

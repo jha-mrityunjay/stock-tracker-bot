@@ -1,28 +1,60 @@
 import os
 import logging
+import httpx
 from datetime import date
 import yfinance as yf
-from supabase import create_client, Client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- Config from environment variables ---
+# --- Config ---
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
-# --- Init clients ---
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
+}
+DB_URL = f"{SUPABASE_URL}/rest/v1/stocks"
 
 logging.basicConfig(level=logging.INFO)
 
-# --- Helper: Fetch live price from Yahoo Finance ---
+# --- DB Helpers ---
+def db_select(filters: dict):
+    params = {"select": "*"}
+    for k, v in filters.items():
+        params[k] = f"eq.{v}"
+    r = httpx.get(DB_URL, headers=HEADERS, params=params)
+    result = r.json()
+    return result if isinstance(result, list) else []
+
+def db_select_all(user_id):
+    params = {"select": "*", "user_id": f"eq.{user_id}"}
+    r = httpx.get(DB_URL, headers=HEADERS, params=params)
+    result = r.json()
+    return result if isinstance(result, list) else []
+
+def db_insert(data: dict):
+    httpx.post(DB_URL, headers=HEADERS, json=data)
+
+def db_delete(filters: dict):
+    params = {}
+    for k, v in filters.items():
+        params[k] = f"eq.{v}"
+    httpx.delete(DB_URL, headers=HEADERS, params=params)
+
+# --- Price Fetch ---
 def get_live_price(stock_name: str):
-    ticker = yf.Ticker(f"{stock_name.upper()}.NS")
-    data = ticker.history(period="1d")
-    if data.empty:
+    try:
+        ticker = yf.Ticker(f"{stock_name.upper()}.NS")
+        data = ticker.history(period="1d")
+        if data.empty:
+            return None
+        return round(data["Close"].iloc[-1], 2)
+    except Exception:
         return None
-    return round(data["Close"].iloc[-1], 2)
 
 # --- /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -36,14 +68,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help — Show this menu"
     )
 
-# --- /help ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
-# --- /add STOCKNAME ---
+# --- /add ---
 async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if not context.args:
         await update.message.reply_text("❌ Usage: /add INFY")
         return
@@ -53,31 +83,25 @@ async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     price = get_live_price(stock_name)
     if price is None:
+        await update.message.reply_text(f"❌ Could not fetch price for {stock_name}. Make sure it's a valid NSE symbol.")
+        return
+
+    existing = db_select({"user_id": user_id, "stock_name": stock_name})
+    if existing:
         await update.message.reply_text(
-            f"❌ Could not fetch price for {stock_name}. Make sure it's a valid NSE symbol."
+            f"⚠️ Already tracking {stock_name}.\n"
+            f"Entry price: ₹{existing[0]['entry_price']}\n"
+            f"Use /remove {stock_name} first to reset."
         )
         return
 
-    # Check if already tracking
-    existing = supabase.table("stocks").select("*")\
-        .eq("user_id", user_id).eq("stock_name", stock_name).execute()
-
-    if existing.data:
-        await update.message.reply_text(
-            f"⚠️ You're already tracking {stock_name}.\n"
-            f"Entry price: ₹{existing.data[0]['entry_price']}\n"
-            f"Use /remove {stock_name} first if you want to reset it."
-        )
-        return
-
-    # Save to Supabase
-    supabase.table("stocks").insert({
+    db_insert({
         "user_id": user_id,
         "stock_name": stock_name,
         "exchange": "NSE",
         "entry_price": price,
         "entry_date": str(date.today())
-    }).execute()
+    })
 
     await update.message.reply_text(
         f"✅ Now tracking *{stock_name}*\n"
@@ -86,26 +110,21 @@ async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# --- /check STOCKNAME ---
+# --- /check ---
 async def check_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if not context.args:
         await update.message.reply_text("❌ Usage: /check INFY")
         return
 
     stock_name = context.args[0].upper()
+    result = db_select({"user_id": user_id, "stock_name": stock_name})
 
-    result = supabase.table("stocks").select("*")\
-        .eq("user_id", user_id).eq("stock_name", stock_name).execute()
-
-    if not result.data:
-        await update.message.reply_text(
-            f"❌ You're not tracking {stock_name}. Use /add {stock_name} first."
-        )
+    if not result:
+        await update.message.reply_text(f"❌ Not tracking {stock_name}. Use /add {stock_name} first.")
         return
 
-    row = result.data[0]
+    row = result[0]
     entry_price = float(row["entry_price"])
     entry_date = date.fromisoformat(row["entry_date"])
     days_held = (date.today() - entry_date).days
@@ -131,33 +150,29 @@ async def check_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- /portfolio ---
 async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    result = db_select_all(user_id)
 
-    result = supabase.table("stocks").select("*").eq("user_id", user_id).execute()
-
-    if not result.data:
-        await update.message.reply_text(
-            "📭 You have no stocks tracked yet. Use /add INFY to start."
-        )
+    if not result:
+        await update.message.reply_text("📭 No stocks tracked yet. Use /add INFY to start.")
         return
 
     await update.message.reply_text("⏳ Fetching live prices for your portfolio...")
-
     lines = ["📈 *Your Portfolio*\n"]
-    for row in result.data:
+
+    for row in result:
         stock_name = row["stock_name"]
         entry_price = float(row["entry_price"])
         entry_date = date.fromisoformat(row["entry_date"])
         days_held = (date.today() - entry_date).days
-
         current_price = get_live_price(stock_name)
+
         if current_price is None:
-            lines.append(f"• {stock_name} — ❌ Price unavailable")
+            lines.append(f"• {stock_name} — ❌ Price unavailable\n")
             continue
 
         change_pct = ((current_price - entry_price) / entry_price) * 100
         arrow = "🟢" if change_pct >= 0 else "🔴"
         sign = "+" if change_pct >= 0 else ""
-
         lines.append(
             f"{arrow} *{stock_name}*\n"
             f"   Entry: ₹{entry_price} → Now: ₹{current_price}\n"
@@ -166,26 +181,21 @@ async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# --- /remove STOCKNAME ---
+# --- /remove ---
 async def remove_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if not context.args:
         await update.message.reply_text("❌ Usage: /remove INFY")
         return
 
     stock_name = context.args[0].upper()
+    result = db_select({"user_id": user_id, "stock_name": stock_name})
 
-    result = supabase.table("stocks").select("*")\
-        .eq("user_id", user_id).eq("stock_name", stock_name).execute()
-
-    if not result.data:
+    if not result:
         await update.message.reply_text(f"❌ You're not tracking {stock_name}.")
         return
 
-    supabase.table("stocks").delete()\
-        .eq("user_id", user_id).eq("stock_name", stock_name).execute()
-
+    db_delete({"user_id": user_id, "stock_name": stock_name})
     await update.message.reply_text(f"🗑️ Removed *{stock_name}* from your tracker.", parse_mode="Markdown")
 
 # --- Main ---
