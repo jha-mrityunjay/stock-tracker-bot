@@ -299,7 +299,9 @@ async def main():
     print("🤖 Bot is running...")
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
+    # Clear any existing webhook or running instance
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    await app.updater.start_polling(drop_pending_updates=True)
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
