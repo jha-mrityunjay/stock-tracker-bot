@@ -1,6 +1,7 @@
 import os
 import logging
 import httpx
+import yfinance as yf
 from datetime import date
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -10,7 +11,6 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
-# --- Supabase DB Headers ---
 DB_HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -45,44 +45,16 @@ def db_delete(filters: dict):
         params[k] = f"eq.{v}"
     httpx.delete(DB_URL, headers=DB_HEADERS, params=params)
 
-# --- NSE Live Price Fetch ---
+# --- Yahoo Finance Price Fetch ---
 def get_live_price(stock_name: str):
     try:
-        session_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.nseindia.com/get-quotes/equity?symbol=" + stock_name.upper(),
-            "Connection": "keep-alive",
-            "sec-fetch-site": "same-origin",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-dest": "empty",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-        with httpx.Client(follow_redirects=True, timeout=15, http2=False) as client:
-            # Step 1: Get cookies by visiting the quote page
-            client.get(
-                f"https://www.nseindia.com/get-quotes/equity?symbol={stock_name.upper()}",
-                headers={
-                    "User-Agent": session_headers["User-Agent"],
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Connection": "keep-alive",
-                }
-            )
-            # Step 2: Fetch the API with JSON headers
-            r = client.get(
-                f"https://www.nseindia.com/api/quote-equity?symbol={stock_name.upper()}",
-                headers=session_headers
-            )
-            data = r.json()
-            price = data["priceInfo"]["lastPrice"]
-            return round(float(price), 2)
+        ticker = yf.Ticker(f"{stock_name.upper()}.NS")
+        data = ticker.history(period="5d")
+        if data.empty:
+            return None
+        return round(float(data["Close"].iloc[-1]), 2)
     except Exception as e:
-        logging.error(f"NSE price fetch error for {stock_name}: {e}")
+        logging.error(f"Price fetch error for {stock_name}: {e}")
         return None
 
 # --- /start ---
@@ -108,7 +80,7 @@ async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     stock_name = context.args[0].upper()
-    await update.message.reply_text(f"⏳ Fetching live price for {stock_name} from NSE...")
+    await update.message.reply_text(f"⏳ Fetching live price for {stock_name}...")
 
     price = get_live_price(stock_name)
     if price is None:
@@ -163,7 +135,7 @@ async def check_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current_price = get_live_price(stock_name)
     if current_price is None:
-        await update.message.reply_text(f"❌ Could not fetch current price for {stock_name} from NSE.")
+        await update.message.reply_text(f"❌ Could not fetch current price for {stock_name}.")
         return
 
     change_pct = ((current_price - entry_price) / entry_price) * 100
@@ -188,7 +160,7 @@ async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 No stocks tracked yet. Use /add INFY to start.")
         return
 
-    await update.message.reply_text("⏳ Fetching live prices from NSE...")
+    await update.message.reply_text("⏳ Fetching live prices...")
     lines = ["📈 *Your Portfolio*\n"]
 
     for row in result:
