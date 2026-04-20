@@ -2,7 +2,6 @@ import os
 import logging
 import httpx
 from datetime import date
-import yfinance as yf
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -11,6 +10,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
+# --- Supabase DB Headers ---
 HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -18,6 +18,16 @@ HEADERS = {
     "Prefer": "return=representation"
 }
 DB_URL = f"{SUPABASE_URL}/rest/v1/stocks"
+
+# --- NSE Headers (mimics browser to avoid block) ---
+NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.nseindia.com/",
+    "Connection": "keep-alive",
+}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -45,15 +55,20 @@ def db_delete(filters: dict):
         params[k] = f"eq.{v}"
     httpx.delete(DB_URL, headers=HEADERS, params=params)
 
-# --- Price Fetch ---
+# --- NSE Live Price Fetch ---
 def get_live_price(stock_name: str):
     try:
-        ticker = yf.Ticker(f"{stock_name.upper()}.NS")
-        data = ticker.history(period="1d")
-        if data.empty:
-            return None
-        return round(data["Close"].iloc[-1], 2)
-    except Exception:
+        # First hit the NSE homepage to get cookies
+        with httpx.Client(headers=NSE_HEADERS, follow_redirects=True, timeout=10) as client:
+            client.get("https://www.nseindia.com")
+            # Now fetch the actual quote
+            url = f"https://www.nseindia.com/api/quote-equity?symbol={stock_name.upper()}"
+            r = client.get(url)
+            data = r.json()
+            price = data["priceInfo"]["lastPrice"]
+            return round(float(price), 2)
+    except Exception as e:
+        logging.error(f"NSE price fetch error for {stock_name}: {e}")
         return None
 
 # --- /start ---
@@ -79,11 +94,14 @@ async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     stock_name = context.args[0].upper()
-    await update.message.reply_text(f"⏳ Fetching live price for {stock_name}...")
+    await update.message.reply_text(f"⏳ Fetching live price for {stock_name} from NSE...")
 
     price = get_live_price(stock_name)
     if price is None:
-        await update.message.reply_text(f"❌ Could not fetch price for {stock_name}. Make sure it's a valid NSE symbol.")
+        await update.message.reply_text(
+            f"❌ Could not fetch price for {stock_name}.\n"
+            f"Make sure it's a valid NSE symbol (e.g. RELIANCE, INFY, TCS)"
+        )
         return
 
     existing = db_select({"user_id": user_id, "stock_name": stock_name})
@@ -131,7 +149,7 @@ async def check_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current_price = get_live_price(stock_name)
     if current_price is None:
-        await update.message.reply_text(f"❌ Could not fetch current price for {stock_name}.")
+        await update.message.reply_text(f"❌ Could not fetch current price for {stock_name} from NSE.")
         return
 
     change_pct = ((current_price - entry_price) / entry_price) * 100
@@ -156,7 +174,7 @@ async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 No stocks tracked yet. Use /add INFY to start.")
         return
 
-    await update.message.reply_text("⏳ Fetching live prices for your portfolio...")
+    await update.message.reply_text("⏳ Fetching live prices from NSE...")
     lines = ["📈 *Your Portfolio*\n"]
 
     for row in result:
