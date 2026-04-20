@@ -45,14 +45,19 @@ def db_delete(filters: dict):
         params[k] = f"eq.{v}"
     httpx.delete(DB_URL, headers=DB_HEADERS, params=params)
 
-# --- Yahoo Finance Price Fetch ---
+# --- Price Fetch ---
 def get_live_price(stock_name: str):
     try:
         ticker = yf.Ticker(f"{stock_name.upper()}.NS")
+        # Try fast_info first (most reliable)
+        price = ticker.fast_info.get("last_price") or ticker.fast_info.get("previous_close")
+        if price and float(price) > 0:
+            return round(float(price), 2)
+        # Fallback to history
         data = ticker.history(period="5d")
-        if data.empty:
-            return None
-        return round(float(data["Close"].iloc[-1]), 2)
+        if not data.empty:
+            return round(float(data["Close"].iloc[-1]), 2)
+        return None
     except Exception as e:
         logging.error(f"Price fetch error for {stock_name}: {e}")
         return None
