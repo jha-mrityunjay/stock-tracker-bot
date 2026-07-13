@@ -1,4 +1,5 @@
-python-telegram-bot==21.3
-yfinance>=0.2.50
-httpx==0.27.0
-aiohttp==3.9.5
+# No runtime dependencies — handler.py uses only the Python standard library,
+# so the Lambda deployment package is just handler.py + nse_equity.json (~80 KB).
+#
+# This is deliberate: it keeps cold starts fast and means there is no build step
+# (no pip install --target, no native wheels) that can break the deploy.

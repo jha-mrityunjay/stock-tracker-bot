@@ -1,0 +1,6 @@
+.env
+function.zip
+env.json
+trust-policy.json
+__pycache__/
+*.pyc
