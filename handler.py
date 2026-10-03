@@ -610,7 +610,11 @@ def paginate(items, size, page):
 WATCH_PAGE = 40
 
 
-def view_watchlist(user_id, page=0):
+# "ret": biggest gainers first. "date": most recently added (or listed) first.
+WATCH_SORTS = {"ret": "biggest gainers first", "date": "latest first"}
+
+
+def view_watchlist(user_id, page=0, order="ret"):
     rows = positions(user_id, bucket=WATCHLIST)
     if not rows:
         return ("👀 *Watchlist*\n\nNothing on your watchlist.\n\n"
@@ -625,9 +629,14 @@ def view_watchlist(user_id, page=0):
             unpriced.append(r)
         else:
             priced.append((pct(float(r["entry_price"]), current), current, r))
-    # Biggest movers first, so page 1 is the interesting one.
-    priced.sort(key=lambda x: x[0], reverse=True)
+    order = order if order in WATCH_SORTS else "ret"
     ordered = priced + [(None, None, r) for r in unpriced]
+    if order == "date":
+        # Newest first; id breaks ties between rows added on the same day.
+        ordered.sort(key=lambda x: (x[2]["entry_date"], x[2]["id"]), reverse=True)
+    else:
+        # Biggest movers first, so page 1 is the interesting one.
+        ordered.sort(key=lambda x: (x[0] is not None, x[0] or 0), reverse=True)
 
     chunk, page, pages = paginate(ordered, WATCH_PAGE, page)
 
@@ -638,24 +647,30 @@ def view_watchlist(user_id, page=0):
         up = sum(1 for c, _, _ in priced if c >= 0)
         lines.append(f"{dot(avg)} Avg move: *{signed(avg)}* · ✅ {up} up · ❌ {len(priced) - up} down")
     if pages > 1:
-        lines.append(f"_Page {page + 1} of {pages} · biggest gainers first_")
+        lines.append(f"_Page {page + 1} of {pages} · {WATCH_SORTS[order]}_")
     lines.append("")
 
     today = date.today()
     for change, current, r in chunk:
         symbol = r["stock_name"]
+        since = date.fromisoformat(r["entry_date"])
+        when = f"{since.strftime('%d %b %y')} · {(today - since).days}d"
         if current is None:
-            lines.append(f"• *{symbol}* — ❌ Price unavailable\n")
+            lines.append(f"• *{symbol}* — ❌ Price unavailable · {when}\n")
             continue
-        days = (today - date.fromisoformat(r["entry_date"])).days
         lines.append(
             f"{dot(change)} *{symbol}*  {signed(change)}\n"
-            f"   ₹{float(r['entry_price'])} → ₹{current} · {days}d\n"
+            f"   ₹{float(r['entry_price'])} → ₹{current} · {when}\n"
         )
 
-    keyboard = [[{"text": "💰 I bought one", "callback_data": "buymenu"}]]
+    # The active sort is marked; tapping either goes back to page 1.
+    keyboard = [
+        [{"text": ("✓ " if order == key else "") + label, "callback_data": f"wp:{key}:0"}
+         for key, label in (("ret", "📈 Return"), ("date", "📅 Latest"))],
+        [{"text": "💰 I bought one", "callback_data": "buymenu"}],
+    ]
     if pages > 1:
-        keyboard.append(pager("wp", page, pages))
+        keyboard.append(pager(f"wp:{order}", page, pages))
     return "\n".join(lines), keyboard + NAV
 
 
@@ -1345,9 +1360,12 @@ def dispatch_callback(cb, pending):
                     "exited": view_exited, "watch": view_watchlist}[which](user_id)
         edit(text, kb)
 
-    elif data.startswith("wp:"):        # watchlist page
+    elif data.startswith("wp:"):        # watchlist sort + page: "wp:date:2"
         answer()
-        edit(*view_watchlist(user_id, int(data.split(":", 1)[1])))
+        parts = data.split(":")
+        # "wp:2" is the pre-sort format, still on buttons in old messages.
+        order, page = (parts[1], parts[2]) if len(parts) == 3 else ("ret", parts[1])
+        edit(*view_watchlist(user_id, int(page), order))
 
     elif data.startswith("pg:"):        # multi-select menu page
         answer()
