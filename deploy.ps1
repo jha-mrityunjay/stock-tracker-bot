@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $FunctionName = "stock-tracker-bot"
 $RoleName     = "stock-tracker-bot-role"
-$Region       = "ap-south-1"   # Mumbai — closest to Upstox and to you
+$Region       = "ap-south-1"   # Mumbai - closest to Upstox and to you
 $Runtime      = "python3.13"
 
 # --- Load .env ---------------------------------------------------------
@@ -46,7 +46,15 @@ if (-not $roleArn) {
 
 # --- Package -----------------------------------------------------------
 if (Test-Path "function.zip") { Remove-Item "function.zip" }
-Compress-Archive -Path "handler.py", "nse_equity.json" -DestinationPath "function.zip"
+
+# Every runtime file must be listed here. Miss one and the deploy still succeeds;
+# it only blows up later, at the moment a user touches that code path.
+# Keep this file pure ASCII - PowerShell 5.1 reads it as ANSI and chokes on UTF-8.
+$Payload = @("handler.py", "nse_equity.json", "nse_underlyings.json")
+foreach ($f in $Payload) {
+    if (-not (Test-Path $f)) { throw "Missing $f - run: python build_instruments.py" }
+}
+Compress-Archive -Path $Payload -DestinationPath "function.zip"
 Write-Host "Packaged function.zip ($([math]::Round((Get-Item function.zip).Length / 1KB)) KB)" -ForegroundColor Cyan
 
 # --- Environment variables (as JSON, to survive special characters) -----
@@ -70,13 +78,13 @@ if ($exists) {
         --zip-file fileb://function.zip --region $Region | Out-Null
     aws lambda wait function-updated --function-name $FunctionName --region $Region
     aws lambda update-function-configuration --function-name $FunctionName `
-        --environment file://env.json --timeout 30 --memory-size 256 `
+        --environment file://env.json --timeout 30 --memory-size 1024 `
         --region $Region | Out-Null
 } else {
     Write-Host "Creating function..." -ForegroundColor Yellow
     aws lambda create-function --function-name $FunctionName `
         --runtime $Runtime --handler handler.lambda_handler --role $roleArn `
-        --zip-file fileb://function.zip --timeout 30 --memory-size 256 `
+        --zip-file fileb://function.zip --timeout 30 --memory-size 1024 `
         --environment file://env.json --region $Region | Out-Null
 }
 aws lambda wait function-updated --function-name $FunctionName --region $Region
@@ -117,6 +125,61 @@ try {
 } catch {}
 $url = $url.TrimEnd("/")
 Write-Host "Function URL: $url" -ForegroundColor Green
+
+# --- Expiry settlement cron ---------------------------------------------
+# Options expire worthless or in-the-money, and the contract disappears from
+# Upstox's instrument list the next morning - so we must settle on the day or
+# lose the ability to price it at all. Fires 16:00 IST (10:30 UTC), after the
+# 15:30 close, Mon-Fri. EventBridge is free at this volume (~22 calls/month).
+$RuleName = "stock-tracker-bot-settle"
+Write-Host "Configuring expiry-settlement cron..." -ForegroundColor Yellow
+
+aws events put-rule --name $RuleName `
+    --schedule-expression "cron(30 10 ? * MON-FRI *)" `
+    --description "Settle expired option positions after NSE close" `
+    --region $Region | Out-Null
+
+$fnArn = (aws lambda get-function-configuration --function-name $FunctionName `
+    --region $Region --query FunctionArn --output text)
+
+try {
+    aws lambda add-permission --function-name $FunctionName `
+        --statement-id AllowSettlementCron --action lambda:InvokeFunction `
+        --principal events.amazonaws.com `
+        --source-arn "arn:aws:events:${Region}:${AccountId}:rule/$RuleName" `
+        --region $Region 2>$null | Out-Null
+} catch {}
+
+# The constant Input is what handler.py checks to tell a cron run from a webhook.
+$targets = '[{"Id":"1","Arn":"' + $fnArn + '","Input":"{\"task\":\"settle\"}"}]'
+$targets | Out-File -FilePath "targets.json" -Encoding ascii
+aws events put-targets --rule $RuleName --targets file://targets.json --region $Region | Out-Null
+Remove-Item "targets.json"
+
+# --- Keep-warm ping ------------------------------------------------------
+# A cold start costs ~1s of container boot, and worse, a fresh container has to
+# redo every TLS handshake (~417ms to Telegram alone). Pinging every 5 minutes
+# keeps one container and its pooled connections hot, so taps feel instant.
+# ~8,600 invocations/month against a permanent 1,000,000 free - still Rs 0.
+$WarmRule = "stock-tracker-bot-warm"
+Write-Host "Configuring keep-warm ping..." -ForegroundColor Yellow
+
+aws events put-rule --name $WarmRule --schedule-expression "rate(5 minutes)" `
+    --description "Keep the bot container and its TLS connections warm" `
+    --region $Region | Out-Null
+
+try {
+    aws lambda add-permission --function-name $FunctionName `
+        --statement-id AllowWarmCron --action lambda:InvokeFunction `
+        --principal events.amazonaws.com `
+        --source-arn "arn:aws:events:${Region}:${AccountId}:rule/$WarmRule" `
+        --region $Region 2>$null | Out-Null
+} catch {}
+
+$warmTargets = '[{"Id":"1","Arn":"' + $fnArn + '","Input":"{\"task\":\"warm\"}"}]'
+$warmTargets | Out-File -FilePath "warm-targets.json" -Encoding ascii
+aws events put-targets --rule $WarmRule --targets file://warm-targets.json --region $Region | Out-Null
+Remove-Item "warm-targets.json"
 
 # --- Point Telegram at it ------------------------------------------------
 Write-Host "Registering Telegram webhook..." -ForegroundColor Yellow
