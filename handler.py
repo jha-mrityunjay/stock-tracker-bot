@@ -768,14 +768,14 @@ def load_liquid():
     return _liquid
 
 
-# The uptrend section can be all 100 names in a strong market, which would blow
-# Telegram's 4096-character limit, so it pages. Movers stay on page 1 only.
+# Two tabs, both sorted by today's move: all 100, or only the uptrends. 100 lines
+# would blow Telegram's 4096-character limit, so both page.
 LIQUID_PAGE = 25
+LIQUID_TABS = {"all": "📊 All", "up": "📈 Uptrend"}
 
 
-def view_liquid(page=0):
-    """(text, keyboard). Page 1 has the day's movers; every page has a slice of
-    the uptrend list."""
+def view_liquid(page=0, tab="all"):
+    """(text, keyboard) for one page of one tab."""
     data = load_liquid()
     stocks = data["stocks"]
     keys = {s["s"]: instrument_key(s["s"]) for s in stocks}
@@ -800,20 +800,27 @@ def view_liquid(page=0):
                 f" {trend_icon.get(s['t'], '➖')}{' F&O' if s['f'] else ''}")
 
     ups = [m for m in moves if m[2]["t"] == "uptrend"]
-    chunk, page, pages = paginate(ups, LIQUID_PAGE, page)
+    tab = tab if tab in LIQUID_TABS else "all"
+    shown = ups if tab == "up" else moves
+    chunk, page, pages = paginate(shown, LIQUID_PAGE, page)
 
     lines = [f"💧 *Liquid 100* (list as of {data['as_of']})",
-             f"✅ {up} up · ❌ {len(moves) - up} down today"]
-    if pages > 1:
-        lines.append(f"_Page {page + 1} of {pages}_")
-    if page == 0:
-        lines += ["", "*Top gainers*"] + [line(m) for m in moves[:10]] + \
-                 ["", "*Top losers*"] + [line(m) for m in moves[::-1][:10]]
-    if ups:
-        lines += ["", f"*In an uptrend ({len(ups)})* — close > 50-DMA > 200-DMA"] + \
-                 [line(m) for m in chunk]
+             f"✅ {up} up · ❌ {len(moves) - up} down today", ""]
+    if tab == "up":
+        lines.append(f"*In an uptrend ({len(ups)})* — close > 50-DMA > 200-DMA")
+    else:
+        lines.append(f"*All {len(moves)}* — gainers first, losers on the last page")
+    lines.append(f"_Page {page + 1} of {pages}_")
+    lines += [line(m) for m in chunk] or ["Nothing in an uptrend today."]
     lines += ["", "📈 uptrend · 📉 downtrend · ➖ mixed"]
-    return "\n".join(lines), [pager("lq", page, pages)] if pages > 1 else None
+
+    keyboard = [[{"text": ("✓ " if key == tab else "") + label
+                  + (f" ({len(ups)})" if key == "up" else ""),
+                  "callback_data": f"lq:{key}:0"}
+                 for key, label in LIQUID_TABS.items()]]
+    if pages > 1:
+        keyboard.append(pager(f"lq:{tab}", page, pages))
+    return "\n".join(lines), keyboard
 
 
 # --- Commands -----------------------------------------------------------
@@ -1464,9 +1471,12 @@ def dispatch_callback(cb, pending):
         order, page = (parts[1], parts[2]) if len(parts) == 3 else ("ret", parts[1])
         edit(*view_watchlist(user_id, int(page), order))
 
-    elif data.startswith("lq:"):        # /liquid page
+    elif data.startswith("lq:"):        # /liquid tab + page: "lq:up:1"
         answer()
-        edit(*view_liquid(int(data.split(":", 1)[1])))
+        parts = data.split(":")
+        # "lq:2" is the earlier single-list format, still on old messages.
+        tab, page = (parts[1], parts[2]) if len(parts) == 3 else ("up", parts[1])
+        edit(*view_liquid(int(page), tab))
 
     elif data.startswith("pg:"):        # multi-select menu page
         answer()
