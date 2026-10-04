@@ -183,6 +183,28 @@ $warmTargets | Out-File -FilePath "warm-targets.json" -Encoding ascii
 aws events put-targets --rule $WarmRule --targets file://warm-targets.json --region $Region | Out-Null
 Remove-Item "warm-targets.json"
 
+# --- Command menu ----------------------------------------------------------
+# The "/" menu in Telegram is stored on Telegram's side, not read from the code,
+# so a new command stays invisible until it is listed here. Keep this in step
+# with the commands handled in handle_message (handler.py). ASCII only.
+Write-Host "Setting Telegram command menu..." -ForegroundColor Yellow
+$commands = @(
+    @{ command = "portfolio"; description = "Dashboard: active, exited, watchlist" },
+    @{ command = "add";       description = "Track a stock or an option" },
+    @{ command = "watch";     description = "Watch a stock you don't own yet" },
+    @{ command = "check";     description = "Check one stock's % change" },
+    @{ command = "liquid";    description = "Today's movers in the 100 most liquid stocks" },
+    @{ command = "bought";    description = "Move watched stocks into your portfolio" },
+    @{ command = "exit";      description = "Mark positions as sold" },
+    @{ command = "remove";    description = "Delete positions permanently" },
+    @{ command = "myid";      description = "Show your Telegram ID" },
+    @{ command = "help";      description = "How the bot works" }
+)
+$cmdBody = @{ commands = $commands } | ConvertTo-Json -Compress -Depth 3
+$cmdResp = Invoke-RestMethod -Method Post -ContentType "application/json" `
+    -Uri "https://api.telegram.org/bot$($cfg['TELEGRAM_TOKEN'])/setMyCommands" -Body $cmdBody
+if (-not $cmdResp.ok) { throw "Telegram setMyCommands failed: $($cmdResp | ConvertTo-Json -Compress)" }
+
 # --- Point Telegram at it ------------------------------------------------
 Write-Host "Registering Telegram webhook..." -ForegroundColor Yellow
 $body = @{
