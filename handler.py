@@ -768,11 +768,20 @@ def load_liquid():
     return _liquid
 
 
-def view_liquid():
+# The uptrend section can be all 100 names in a strong market, which would blow
+# Telegram's 4096-character limit, so it pages. Movers stay on page 1 only.
+LIQUID_PAGE = 25
+
+
+def view_liquid(page=0):
+    """(text, keyboard). Page 1 has the day's movers; every page has a slice of
+    the uptrend list."""
     data = load_liquid()
     stocks = data["stocks"]
     keys = {s["s"]: instrument_key(s["s"]) for s in stocks}
-    quotes = get_quotes([k for k in keys.values() if k])
+    # Cached so paging doesn't refetch 100 quotes on every tap.
+    quotes = cached(("liquid",), PRICE_TTL,
+                    lambda: get_quotes([k for k in keys.values() if k]))
     moves = []
     for s in stocks:
         q = quotes.get(keys[s["s"]])
@@ -780,7 +789,7 @@ def view_liquid():
             last, cp = q
             moves.append((pct(cp, last), last, s))
     if not moves:
-        return "❌ Prices unavailable right now."
+        return "❌ Prices unavailable right now.", None
     moves.sort(key=lambda m: m[0], reverse=True)
     up = sum(1 for m in moves if m[0] >= 0)
     trend_icon = {"uptrend": "📈", "downtrend": "📉"}
@@ -790,15 +799,21 @@ def view_liquid():
         return (f"{dot(change)} *{s['s']}* {signed(change)} · ₹{last}"
                 f" {trend_icon.get(s['t'], '➖')}{' F&O' if s['f'] else ''}")
 
-    lines = [f"💧 *Liquid 100* (list as of {data['as_of']})",
-             f"✅ {up} up · ❌ {len(moves) - up} down today", "",
-             "*Top gainers*"] + [line(m) for m in moves[:10]] + ["", "*Top losers*"] + \
-            [line(m) for m in moves[::-1][:10]]
     ups = [m for m in moves if m[2]["t"] == "uptrend"]
+    chunk, page, pages = paginate(ups, LIQUID_PAGE, page)
+
+    lines = [f"💧 *Liquid 100* (list as of {data['as_of']})",
+             f"✅ {up} up · ❌ {len(moves) - up} down today"]
+    if pages > 1:
+        lines.append(f"_Page {page + 1} of {pages}_")
+    if page == 0:
+        lines += ["", "*Top gainers*"] + [line(m) for m in moves[:10]] + \
+                 ["", "*Top losers*"] + [line(m) for m in moves[::-1][:10]]
     if ups:
-        lines += ["", f"*In an uptrend ({len(ups)})* — close > 50-DMA > 200-DMA"] + [line(m) for m in ups]
+        lines += ["", f"*In an uptrend ({len(ups)})* — close > 50-DMA > 200-DMA"] + \
+                 [line(m) for m in chunk]
     lines += ["", "📈 uptrend · 📉 downtrend · ➖ mixed"]
-    return "\n".join(lines)
+    return "\n".join(lines), [pager("lq", page, pages)] if pages > 1 else None
 
 
 # --- Commands -----------------------------------------------------------
@@ -1316,7 +1331,8 @@ def handle_message(msg):
         elif command == "/remove":
             do_remove_menu(chat_id, user_id)
         elif command == "/liquid":
-            send(chat_id, view_liquid())
+            text, kb = view_liquid()
+            send(chat_id, text, {"inline_keyboard": kb} if kb else None)
         elif command == "/myid":
             send(chat_id, f"🆔 Your Telegram ID: `{user_id}`")
         else:
@@ -1447,6 +1463,10 @@ def dispatch_callback(cb, pending):
         # "wp:2" is the pre-sort format, still on buttons in old messages.
         order, page = (parts[1], parts[2]) if len(parts) == 3 else ("ret", parts[1])
         edit(*view_watchlist(user_id, int(page), order))
+
+    elif data.startswith("lq:"):        # /liquid page
+        answer()
+        edit(*view_liquid(int(data.split(":", 1)[1])))
 
     elif data.startswith("pg:"):        # multi-select menu page
         answer()
