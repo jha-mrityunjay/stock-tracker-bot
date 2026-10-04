@@ -123,6 +123,8 @@ def request(method, url, headers=None, body=None, benign=()):
     error so that real failures stay visible in CloudWatch.
     """
     parts = urllib.parse.urlsplit(url)
+    # The Telegram token is part of the URL path; never write it to CloudWatch.
+    shown = url.split("?")[0].replace(TELEGRAM_TOKEN, "<token>")
     path = parts.path + (f"?{parts.query}" if parts.query else "")
     hdrs = {"User-Agent": USER_AGENT, "Connection": "keep-alive", **(headers or {})}
 
@@ -139,7 +141,7 @@ def request(method, url, headers=None, body=None, benign=()):
             if resp.status >= 400:
                 text = raw.decode(errors="replace")
                 level = log.info if any(b in text for b in benign) else log.error
-                level("HTTP %s %s -> %s %s", method, url.split("?")[0], resp.status, text[:300])
+                level("HTTP %s %s -> %s %s", method, shown, resp.status, text[:300])
             try:
                 return resp.status, (json.loads(raw) if raw else None)
             except Exception:
@@ -151,7 +153,7 @@ def request(method, url, headers=None, body=None, benign=()):
             except Exception:
                 pass
             if attempt == 2:
-                log.error("HTTP %s %s failed: %s", method, url.split("?")[0], e)
+                log.error("HTTP %s %s failed: %s", method, shown, e)
                 return 0, None
 
 
