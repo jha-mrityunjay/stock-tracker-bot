@@ -50,7 +50,7 @@ if (Test-Path "function.zip") { Remove-Item "function.zip" }
 # Every runtime file must be listed here. Miss one and the deploy still succeeds;
 # it only blows up later, at the moment a user touches that code path.
 # Keep this file pure ASCII - PowerShell 5.1 reads it as ANSI and chokes on UTF-8.
-$Payload = @("handler.py", "nse_equity.json", "nse_underlyings.json")
+$Payload = @("handler.py", "nse_equity.json", "nse_underlyings.json", "liquid.json")
 foreach ($f in $Payload) {
     if (-not (Test-Path $f)) { throw "Missing $f - run: python build_instruments.py" }
 }

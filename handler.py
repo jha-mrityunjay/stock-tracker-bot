@@ -357,6 +357,28 @@ def _fetch_prices(keys):
     return prices
 
 
+def get_quotes(keys):
+    """instrument_keys -> {instrument_key: (last price, previous close)}, for day moves.
+    Outside market hours last_price is 0, so the move is shown as 0% from cp."""
+    out = {}
+    for i in range(0, len(keys), 500):
+        chunk = keys[i:i + 500]
+        url = f"{UPSTOX_LTP}?{urllib.parse.urlencode({'instrument_key': ','.join(chunk)})}"
+        status, body = http("GET", url, {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {UPSTOX_TOKEN}",
+            "User-Agent": UPSTOX_USER_AGENT,
+        })
+        if status != 200 or not body or body.get("status") != "success":
+            log.error("upstox ltp failed: status=%s body=%s", status, str(body)[:300])
+            continue
+        for entry in (body.get("data") or {}).values():
+            token, cp = entry.get("instrument_token"), entry.get("cp")
+            if token and cp:
+                out[token] = (float(entry.get("last_price") or cp), float(cp))
+    return out
+
+
 def get_price(symbol):
     key = instrument_key(symbol)
     if not key:
@@ -730,6 +752,55 @@ def view_exited(user_id):
     return "\n".join(lines), NAV
 
 
+# --- Liquid list ----------------------------------------------------------
+# The 100 most liquid NIFTY 500 stocks, written by the swing-research system
+# (liquid.json, baked into the zip like nse_equity.json; refresh it monthly and
+# redeploy). For chart practice: today's movers among stocks that are easy to trade.
+
+_liquid: dict | None = None
+
+
+def load_liquid():
+    global _liquid
+    if _liquid is None:
+        with open(os.path.join(os.path.dirname(__file__), "liquid.json"), encoding="utf-8") as f:
+            _liquid = json.load(f)
+    return _liquid
+
+
+def view_liquid():
+    data = load_liquid()
+    stocks = data["stocks"]
+    keys = {s["s"]: instrument_key(s["s"]) for s in stocks}
+    quotes = get_quotes([k for k in keys.values() if k])
+    moves = []
+    for s in stocks:
+        q = quotes.get(keys[s["s"]])
+        if q:
+            last, cp = q
+            moves.append((pct(cp, last), last, s))
+    if not moves:
+        return "❌ Prices unavailable right now."
+    moves.sort(key=lambda m: m[0], reverse=True)
+    up = sum(1 for m in moves if m[0] >= 0)
+    trend_icon = {"uptrend": "📈", "downtrend": "📉"}
+
+    def line(m):
+        change, last, s = m
+        return (f"{dot(change)} *{s['s']}* {signed(change)} · ₹{last}"
+                f" {trend_icon.get(s['t'], '➖')}{' F&O' if s['f'] else ''}")
+
+    lines = [f"💧 *Liquid 100* (list as of {data['as_of']})",
+             f"✅ {up} up · ❌ {len(moves) - up} down today", "",
+             "*Top gainers*"] + [line(m) for m in moves[:10]] + ["", "*Top losers*"] + \
+            [line(m) for m in moves[::-1][:10]]
+    ups = [m for m in moves if m[2]["t"] == "uptrend"]
+    if ups:
+        lines += ["", f"*In an uptrend ({len(ups)})* — close > 50-DMA > 200-DMA"] + [line(m) for m in ups]
+    lines += ["", "📈 uptrend · 📉 downtrend · ➖ mixed"]
+    return "\n".join(lines)
+
+
 # --- Commands -----------------------------------------------------------
 
 HELP = (
@@ -739,7 +810,11 @@ HELP = (
     "/check — Check one stock's % change\n"
     "/exit — Mark positions as sold (keeps them in history)\n"
     "/remove — Delete positions permanently\n"
+    "/liquid — Today's movers among the 100 most liquid stocks\n"
+    "/myid — Your Telegram ID\n"
     "/help — Show this message\n\n"
+    "🤖 IPO breakouts from the research system are added to 👀 Watchlist "
+    "automatically at the signal day's close.\n"
     "💡 `/add INFY` adds a stock directly.\n"
     "💡 /add with no symbol lets you pick an option: "
     "underlying → expiry → strike → CE/PE.\n"
@@ -1240,6 +1315,10 @@ def handle_message(msg):
             do_exit_menu(chat_id, user_id)
         elif command == "/remove":
             do_remove_menu(chat_id, user_id)
+        elif command == "/liquid":
+            send(chat_id, view_liquid())
+        elif command == "/myid":
+            send(chat_id, f"🆔 Your Telegram ID: `{user_id}`")
         else:
             send(chat_id, "🤔 Unknown command. Try /help")
         return
