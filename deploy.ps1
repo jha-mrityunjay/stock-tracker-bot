@@ -176,7 +176,9 @@ try {
         --region $Region 2>$null | Out-Null
 } catch {}
 
-$warmTargets = '[{"Id":"1","Arn":"' + $fnArn + '","Input":"{\"task\":\"warm\"}"}]'
+# The ping also carries our URL, so it can put the webhook back if anything else
+# deletes it (any polling client calls deleteWebhook on startup).
+$warmTargets = '[{"Id":"1","Arn":"' + $fnArn + '","Input":"{\"task\":\"warm\",\"webhook\":\"' + $url + '\"}"}]'
 $warmTargets | Out-File -FilePath "warm-targets.json" -Encoding ascii
 aws events put-targets --rule $WarmRule --targets file://warm-targets.json --region $Region | Out-Null
 Remove-Item "warm-targets.json"

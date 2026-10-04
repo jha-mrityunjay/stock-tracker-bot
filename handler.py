@@ -1380,6 +1380,29 @@ def dispatch_callback(cb, pending):
         answer()
 
 
+def ensure_webhook(url):
+    """Put our webhook back if something removed it.
+
+    Any polling client on this token (the old Railway bot, a local script) calls
+    deleteWebhook when it starts, after which Telegram stops calling us and the
+    bot looks dead with nothing in our logs. The warm ping runs this every 5
+    minutes, which caps that outage at 5 minutes. Messages sent in the meantime
+    are queued by Telegram and delivered once the webhook is back.
+    """
+    if not url:
+        return "skipped"
+    status, info = tg("getWebhookInfo")    # also keeps the Telegram socket warm
+    if status != 200 or not info:
+        return "unknown"
+    current = (info.get("result") or {}).get("url", "")
+    if current == url:
+        return "ok"
+    log.warning("webhook was %r, restoring", current or "removed")
+    tg("setWebhook", url=url, secret_token=WEBHOOK_SECRET,
+       allowed_updates=["message", "callback_query"])
+    return "restored"
+
+
 def lambda_handler(event, context):
     # EventBridge crons, not Telegram: no HTTP envelope, so check these first.
     task = event.get("task")
@@ -1393,8 +1416,7 @@ def lambda_handler(event, context):
         # handshake to Telegram alone costs ~417ms.
         load_symbols()
         load_underlyings()
-        tg("getMe")
-        return {"warm": True}
+        return {"warm": True, "webhook": ensure_webhook(event.get("webhook"))}
 
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     if WEBHOOK_SECRET and headers.get("x-telegram-bot-api-secret-token") != WEBHOOK_SECRET:
