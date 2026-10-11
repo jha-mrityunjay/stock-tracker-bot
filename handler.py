@@ -1523,6 +1523,10 @@ def lambda_handler(event, context):
     if task == "settle":
         return run_settlement()
 
+    if task == "scan":
+        import scan               # evening IPO / volume-spike scan (scan.py)
+        return scan.run_scan(int(event["user"]))
+
     if task == "warm":
         # Keeps a container alive so your next tap doesn't pay a cold start, and
         # — the real prize — keeps the pooled TLS connections open. A fresh

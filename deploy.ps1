@@ -50,7 +50,7 @@ if (Test-Path "function.zip") { Remove-Item "function.zip" }
 # Every runtime file must be listed here. Miss one and the deploy still succeeds;
 # it only blows up later, at the moment a user touches that code path.
 # Keep this file pure ASCII - PowerShell 5.1 reads it as ANSI and chokes on UTF-8.
-$Payload = @("handler.py", "nse_equity.json", "nse_underlyings.json", "liquid.json")
+$Payload = @("handler.py", "scan.py", "nse_equity.json", "nse_underlyings.json", "liquid.json")
 foreach ($f in $Payload) {
     if (-not (Test-Path $f)) { throw "Missing $f - run: python build_instruments.py" }
 }
@@ -155,6 +155,34 @@ $targets = '[{"Id":"1","Arn":"' + $fnArn + '","Input":"{\"task\":\"settle\"}"}]'
 $targets | Out-File -FilePath "targets.json" -Encoding ascii
 aws events put-targets --rule $RuleName --targets file://targets.json --region $Region | Out-Null
 Remove-Item "targets.json"
+
+# --- Evening scan cron -------------------------------------------------------
+# scan.py: IPO breakouts, volume spikes and spike-day breakouts from Upstox's daily
+# OHLC + volume, so signals arrive the same evening even when the office PC is off.
+# Fires 19:30 IST (14:00 UTC) Mon-Fri; holidays are detected from the data and skipped.
+# Its memory (scan_state.json in Supabase Storage) is seeded by the swing-research PC.
+# OwnerId = the Telegram user who gets the message (send /myid to the bot to see it).
+$OwnerId = 7154883730
+$ScanRule = "stock-tracker-bot-scan"
+Write-Host "Configuring evening scan cron..." -ForegroundColor Yellow
+
+aws events put-rule --name $ScanRule `
+    --schedule-expression "cron(0 14 ? * MON-FRI *)" `
+    --description "Evening IPO / volume-spike scan after NSE close" `
+    --region $Region | Out-Null
+
+try {
+    aws lambda add-permission --function-name $FunctionName `
+        --statement-id AllowScanCron --action lambda:InvokeFunction `
+        --principal events.amazonaws.com `
+        --source-arn "arn:aws:events:${Region}:${AccountId}:rule/$ScanRule" `
+        --region $Region 2>$null | Out-Null
+} catch {}
+
+$scanTargets = '[{"Id":"1","Arn":"' + $fnArn + '","Input":"{\"task\":\"scan\",\"user\":' + $OwnerId + '}"}]'
+$scanTargets | Out-File -FilePath "scan-targets.json" -Encoding ascii
+aws events put-targets --rule $ScanRule --targets file://scan-targets.json --region $Region | Out-Null
+Remove-Item "scan-targets.json"
 
 # --- Keep-warm ping ------------------------------------------------------
 # A cold start costs ~1s of container boot, and worse, a fresh container has to
